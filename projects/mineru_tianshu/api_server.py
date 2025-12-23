@@ -17,6 +17,7 @@ import os
 import re
 import uuid
 import json
+import base64
 from minio import Minio
 
 from task_db import TaskDB
@@ -165,13 +166,14 @@ def get_file_metadata(file_path: Path):
     }
 
 
-def get_images_info(image_dir: Path, upload_to_minio: bool = False):
+def get_images_info(image_dir: Path, upload_to_minio: bool = False, encode_base64: bool = False):
     """
     获取图片目录信息
 
     Args:
         image_dir: 图片目录路径
         upload_to_minio: 是否上传到 MinIO
+        encode_base64: 是否将图片转换为 base64 编码
 
     Returns:
         图片信息字典
@@ -180,11 +182,21 @@ def get_images_info(image_dir: Path, upload_to_minio: bool = False):
         return {
             'count': 0,
             'list': [],
-            'uploaded_to_minio': False
+            'uploaded_to_minio': False,
+            'base64_encoded': False
         }
 
-    # 支持的图片格式
-    image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'}
+    # 支持的图片格式及对应的 MIME 类型
+    mime_types = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.bmp': 'image/bmp',
+        '.webp': 'image/webp',
+        '.svg': 'image/svg+xml'
+    }
+    image_extensions = set(mime_types.keys())
     image_files = [f for f in image_dir.iterdir() if f.is_file() and f.suffix.lower() in image_extensions]
 
     images_list = []
@@ -219,12 +231,30 @@ def get_images_info(image_dir: Path, upload_to_minio: bool = False):
                 logger.error(f"Failed to upload image {img_file.name} to MinIO: {e}")
                 img_info['url'] = None
 
+        # 如果需要转换为 base64 编码
+        if encode_base64:
+            try:
+                with open(img_file, 'rb') as f:
+                    image_data = f.read()
+                    base64_encoded = base64.b64encode(image_data).decode('utf-8')
+
+                    # 获取 MIME 类型
+                    file_ext = img_file.suffix.lower()
+                    mime_type = mime_types.get(file_ext, 'application/octet-stream')
+
+                    # 添加 Data URL（包含 MIME 类型和 base64 数据）
+                    img_info['data'] = f"data:{mime_type};base64,{base64_encoded}"
+
+            except Exception as e:
+                logger.error(f"Failed to encode image {img_file.name} to base64: {e}")
+
         images_list.append(img_info)
 
     return {
         'count': len(images_list),
         'list': images_list,
-        'uploaded_to_minio': upload_to_minio
+        'uploaded_to_minio': upload_to_minio,
+        'base64_encoded': encode_base64
     }
 
 
@@ -305,6 +335,7 @@ async def get_task_data(
         description="需要返回的字段，逗号分隔：md,content_list,middle_json,model_output,images,layout_pdf,span_pdf,origin_pdf"
     ),
     upload_images: bool = Query(False, description="是否上传图片到MinIO并返回URL"),
+    encode_base64: bool = Query(True, description="是否将图片转换为base64编码返回"),
     include_metadata: bool = Query(True, description="是否包含文件元数据")
 ):
     """
@@ -454,7 +485,7 @@ async def get_task_data(
                 image_dir = image_dirs[0]
                 logger.info(f"🖼️  Getting images info from: {image_dir}")
 
-                images_info = get_images_info(image_dir, upload_images)
+                images_info = get_images_info(image_dir, upload_images, encode_base64)
                 response['data']['images'] = images_info
 
         # 6. 处理 Layout PDF
